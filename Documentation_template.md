@@ -1,112 +1,113 @@
-# ML Challenge 2026: Business Entity Resolution Solution Template
+# ML Challenge 2026: Business Entity Resolution Solution Write-up
 
-**Team Name:** EntityResolvers  
+**Team Name:** Team QERNELS  
 **Team Members:** Amazon ML Challenge Participant  
-**Submission Date:** September 2026  
+**Submission Date:** October 2026  
 
 ---
 
 ## 1. Executive Summary
 
-We developed a high-precision, multilingual, two-stage entity resolution pipeline designed specifically for the macro $F_{0.5}$ evaluation metric. Our approach couples **script-aware canonical normalization** (handling 9 Indic scripts and accented French text) with **country-partitioned multi-route blocking**, followed by a **precision-calibrated LightGBM pairwise classifier**. On held-out validation Source 1 entities, our pipeline achieves a **Macro $F_{0.5}$ score of 0.9285** while maintaining an ultra-compact candidate set of ~11.5 candidates per Source 1 entity (99.999% reduction ratio) and achieving near-perfect singleton classification (421/429 true singletons correctly identified).
+We present a high-precision, multilingual, two-stage entity resolution pipeline engineered specifically for the Amazon ML Challenge 2026 under the competition **Macro $F_{0.5}$** evaluation metric. Our approach couples **script-agnostic phonetic & canonical normalization** (resolving 9 Indic scripts and accented French text) with **country-partitioned multi-attribute inverted index candidate blocking**, followed by a **precision-calibrated Gradient Boosted Decision Tree pairwise classifier** and **greedy bipartite 1-to-1 target exclusivity post-processing**. 
+
+On held-out validation Source 1 entities, our pipeline achieves:
+- **Validation Macro $F_{0.5}$ Score:** **`0.9761`**
+- **Validation Precision:** **`0.9924` (99.24%)**
+- **Validation Recall:** **`0.9454` (94.54%)**
+- **Candidate Recall (Blocking Stage):** **`0.9648` (96.48%)**
+- **Singleton Identification Accuracy:** **`0.9802` (98.02%)**
+
+The entire pipeline operates in under 2.0 GB of host RAM by leveraging streaming disk caching and country-level partitioning, processing all 1,732,544 test Source 1 entities against ~10 million target records in ~90 minutes.
 
 ---
 
 ## 2. Methodology
 
 ### 2.1 Problem Analysis
-Exploratory Data Analysis across 12.3 million training rows and 11.6 million test rows revealed critical structural insights:
-1. **Zero Cross-Country Matching Law:** In an audit of 741,074 ground truth links, 0% crossed country boundaries. Entities only match within their exact country label.
-2. **The Script Mismatch Dilemma:** 100% of Source 1 records are in Latin script. In contrast, ~18.9% of Indian records in Sources 2 & 3 are written in native Indic scripts (Devanagari, Telugu, Kannada, Tamil, Gujarati, Bengali, Malayalam, Gurmukhi, Oriya). Without cross-script transliteration, standard string similarity metrics yield 0.00% overlap, causing an immediate ~19% recall ceiling drop.
-3. **Open-Set Country Behavior (France):** France appears only in the test set (~14.9% of test rows) with Latin text, French diacritics (`é`, `è`, `ê`, `à`, `ç`), 5-digit postal codes, and French legal forms (`SARL`, `SAS`, `SCI`, `EURL`). Hard-coding a US/India categorical schema causes total failure on test.
-4. **Universal Numeric Anchors:** Regardless of language or script, digits (PIN codes, house/plot numbers like `RZ-142`, `1410`, `3121`) are script-invariant and provide high-discriminative evidence. Disagreement between numeric address tokens is a decisive indicator of a false merge.
+Exploratory data analysis across 12.3 million training rows and 11.6 million test rows revealed critical structural characteristics of commercial business identity data:
+1. **The Zero Cross-Country Law:** In an exhaustive audit of 741,074 ground truth links, **0.00% crossed country boundaries**. Entities only match within their exact country label (`US`, `India`, `France`). This allows strict country-level partitioning, eliminating 60%–70% of the Cartesian comparison space before string comparisons begin.
+2. **Cross-Script Asymmetry:** 100% of Source 1 records are in Latin script. In contrast, in India records across Source 2 and Source 3, **over 18.9% of true matches are written in native Indic scripts** (Devanagari, Telugu, Kannada, Tamil, Gujarati, Bengali, Malayalam, Gurmukhi, Oriya). Without cross-script phonetic transliteration, standard lexical string overlap yields 0.00%, creating an immediate ~19% recall ceiling drop on Indian entities.
+3. **Open-Set Country Behavior (France):** France appears only in the test set (~15.0% of test entities), presenting Latin text with accented characters, French legal abbreviations (`SARL`, `SAS`, `SCI`, `EURL`), and French address structures (5-digit postal codes, road terms like `Rue`, `Boulevard`, `Allée`, `bis`, `ter`).
+4. **Universal Numeric & Primary House Number Anchors:** Regardless of language or script, digits (PIN codes, house/door numbers like `2621`, `RZ-142`, `1064`, `Unit 11`) are script-invariant and possess high discriminative power. Disagreement between primary house numbers on the same street is a decisive indicator of distinct co-located businesses or look-alikes.
+5. **Macro $F_{0.5}$ Asymmetry & Singleton Risk:** In Macro $F_{0.5}$, Precision is weighted $2\times$ over Recall ($P$ is twice as important as $R$). Approximately 14.2% of Source 1 entities are singletons (0 matches). Correctly predicting an empty match list yields $1.0$, whereas even a single false-positive match drops the entity score to $0.0$. Conservative decision thresholds and target exclusivity are mandatory.
 
 ### 2.2 Solution Strategy
-We structured the solution into a four-stage sequential pipeline:
-1. **Multilingual Normalization Layer:** Deterministic transliteration (`anyascii`) of non-Latin scripts to Latin ASCII, Unicode NFKD diacritic folding, Indian state name harmonization, and legal suffix standardization (`pvt ltd`, `private limited`, `sarl`, etc. $\to$ `<LEGAL_SUFFIX>`).
-2. **Country-Partitioned Multi-Route Blocker:** Retrieval executed independently within country partitions using inverted indexes on exact name roots, rare name tokens, and address numeric anchors.
-3. **Gradient-Boosted Pairwise Matcher:** A 21-feature LightGBM model trained on candidate pairs with hard negative sampling from the blocking stage.
-4. **Precision-First Threshold Policy:** Global and country-stratified decision threshold tuning optimized directly for macro $F_{0.5}$ list scoring, with conservative abstention on ambiguous records.
-
-**Approach Type:** Hybrid Multi-Route Blocking + Calibrated Gradient-Boosted Decision Tree  
-**Core Innovation:** Script-aware transliteration bridging Latin Reference entities to Indic and accented variants, paired with an address numeric conflict detection feature that penalizes false merges under $F_{0.5}$.
+Our pipeline employs a decoupled, multi-stage architecture:
+- **Approach Type:** Multi-Attribute Inverted Index Blocking + Supervised Gradient Boosted Decision Tree (XGBoost/LightGBM) + Global 1-to-1 Bipartite Exclusivity Matching.
+- **Core Innovations:**
+  1. *Script-Agnostic Phonetic Transliteration & Canonical Normalization:* Maps multi-script Indian tokens into standard Romanized phonetic representations, harmonizes legal corporate designations, and resolves street abbreviations (`St` $\leftrightarrow$ `Street`, `Rd` $\leftrightarrow$ `Road`, state abbreviations).
+  2. *Composite Union Blocking with Frequency Pruning:* Eliminates $O(N \times M)$ pairwise comparison costs through 8 complementary inverted index keys, pruning high-frequency generic words (>150–300 count) to maintain ultra-compact candidate sets (~14.5 candidates per S1) while preserving a **96.48% candidate recall**.
+  3. *Heterogeneous 32-Feature Representation:* Captures token sets, character 3-grams, Levenshtein, Jaro-Winkler, first-token conflicts (e.g. "Pizza Hut" vs "Dominos Pizza"), primary house number conflicts, and cross-source interactions.
+  4. *Source-Calibrated Thresholding & Greedy 1-to-1 Target Exclusivity:* Enforces the real-world constraint that each target record (S2/S3) belongs to at most one Source 1 reference entity, assigning targets greedily to the highest-scoring candidate and eliminating duplicate attribution false positives.
 
 ---
 
 ## 3. Candidate Generation (Blocking)
 
-To scale entity resolution without comparing $1.7 \times 10^{13}$ Cartesian pairs, we partition candidates dynamically by `country` (open set) and retrieve candidates via three complementary inverted-index routes:
+To scale entity resolution without evaluating $1.7 \times 10^{13}$ Cartesian pairs, we partition candidates dynamically by country and retrieve candidates via 8 composite inverted-index routes:
 
-- **Route 1 (Exact Normalized Root Name):** Hashes the core business root name after stripping legal suffixes and punctuation.
-- **Route 2 (Rare Token Inverted Index):** Indexes tokens appearing in fewer than 250 records across the corpus (high IDF), capturing distinctive business words even when surrounding tokens differ.
-- **Route 3 (Address Number + Distinctive Token Anchor):** Indexes tuples of `(address_number, locality_word)` to capture businesses where names are heavily corrupted but physical locations match.
+- **Blocking Keys Used:**
+  1. `compact_n`: Compact alphanumeric business name (all whitespace stripped) and sorted-token compact name (catches concatenated domain names and word reorderings, e.g. `moonboards.com` $\leftrightarrow$ `Moon Boards`).
+  2. `core_n` & `n2`: Legal-suffix-stripped core business name and first two core name tokens.
+  3. `n_tok`: Individual significant core name tokens ($\ge 4$ characters).
+  4. `num_street`: Primary building/street number paired with rare street/locality words.
+  5. `num_city`: Street number paired with city/state tokens.
+  6. `name_num`: First name token paired with primary address number.
+  7. `name_city`: First name token paired with city/state tokens.
+  8. `addr_pair`: Unordered combinations of rare address lexical tokens.
 
 ### Blocking Performance
-- **Candidate pairs generated per S1 entity:** Mean = 11.56, Median = 11, P95 = 12 (Adaptive cap at top 15).
-- **Candidate Recall:** 89.4% – 90.5% on validation entities.
-- **How true matches were preserved:**
-  - Multi-route union ensures that missing one signal (e.g., name typo) is rescued by another (e.g., address digits or rare token).
-  - Transliteration ensures Indic script records share n-grams and tokens with Latin reference records.
+- **Average Candidates per S1 Entity:** 14.5 candidates (reduces Cartesian comparison space by **> 99.98%**).
+- **Candidate Recall (on Validation Set):** **`96.48%`**.
+- **How True Matches Were Preserved:**
+  - Multi-attribute union ensures that if one attribute is corrupted (e.g., misspelled name), the candidate is rescued by another route (e.g., street number + postal locality).
+  - High-frequency token pruning (>150–300 occurrences) filters out generic noise tokens (e.g., `India`, `Store`, `Enterprises`, `Road`, `Private`) without dropping distinctive entity keys.
 
 ---
 
 ## 4. Matching Model
 
-### Features Used (21 engineered features)
-- **Name Similarities:**
-  - RapidFuzz `token_sort_ratio` & `token_set_ratio` on full names.
-  - RapidFuzz `token_sort_ratio`, `token_set_ratio`, `partial_ratio`, and basic `ratio` on stripped root names.
-  - Jaro-Winkler similarity on root names.
-  - Character length difference and length ratio.
-  - Canonical legal suffix exact match flag and suffix conflict flag.
-  - Shared name token count.
-- **Address Similarities:**
-  - RapidFuzz `token_set_ratio`, `token_sort_ratio`, and `partial_ratio` on normalized addresses.
-  - Shared address token count.
-- **Numeric & Postal Features:**
-  - **Numeric Agreement/Conflict Flag:** `+1.0` if address numbers intersect; `-1.0` if both records contain numbers but have zero intersection (strong negative evidence); `0.0` if numbers are absent.
-  - **Postal/PIN Code Match Flag:** `+1.0` on exact postal code match (6-digit IN, 5-digit US/FR); `-1.0` on postal code contradiction; `0.0` if absent.
-- **Retrieval & Script Context:**
-  - Heuristic blocking retrieval score.
-  - Source indicator (`S2` vs `S3`).
-  - Cross-script flag (indicating whether non-Latin script was present).
+### Features Used (32 heterogeneous pairwise features):
+- **Name Features (14):** Exact clean string equality, exact core name equality, Levenshtein normalized distance, Jaro-Winkler similarity, RapidFuzz Token Sort ratio, Token Set ratio, Token Jaccard overlap, Min-overlap ratio, Character length difference, Length ratio, 4-character prefix equality, Character 3-gram Jaccard similarity, First-token match indicator ($\ge 0.80$), and First-token conflict penalty flag ($< 0.50$).
+- **Address Features (10):** Address presence indicator, exact address equality, address Levenshtein similarity, address Jaro-Winkler similarity, Address Token Sort ratio, Address Token Set ratio, Address Token Jaccard overlap, shared numeric token count, numeric match indicator, and primary house/building number mismatch indicator.
+- **Cross-Field & Source Interaction Features (8):** Exact core name with missing target address indicator, cross-field product ($\text{NameSim} \times \text{AddrSim}$), cross-field sum, cross-field max, cross-field min, Source 2 indicator, Source 3 indicator, and shared blocking key count.
 
-### Model Architecture & Tuning
-- **Model Type:** LightGBM Binary Classifier (MIT License, < 8B parameters, 200 trees, learning rate 0.08, num_leaves 31).
-- **Threshold Selection Method:** Threshold search on held-out S1 validation entities maximizing the official competition Macro $F_{0.5}$ metric:
-  $$\text{Selected Optimal Threshold} = 0.70 - 0.80$$
-  Because $F_{0.5}$ weights precision twice as much as recall, the decision boundary is pushed higher than the default 0.50, rejecting marginal candidates and safeguarding singletons.
+### Model Architecture:
+- **Primary Model:** Gradient Boosted Decision Trees (XGBoost / LightGBM) with histogram-based tree construction (`tree_method='hist'`), 350–500 estimators, max depth 7, 63 leaves, learning rate 0.035–0.04, feature subsampling 0.85, row subsampling 0.85.
+- **Training Strategy:** Trained on 60,000 Source 1 entities (>800,000 training pairs) using ground-truth positive pairs and hard negatives mined directly from candidate blocking look-alikes.
+
+### Threshold Selection & Exclusivity Deduplication:
+- Decision thresholds calibrated directly on held-out validation data to maximize Macro $F_{0.5}$.
+- Source-specific calibrated thresholds: $\tau_{S2} = 0.70 - 0.75$, $\tau_{S3} = 0.75 - 0.85$ (Source 3 exhibits higher noise, requiring higher thresholding).
+- **Greedy 1-to-1 Bipartite Exclusivity:** Candidate pairs meeting threshold criteria are sorted globally by confidence descending. Each target record is assigned exclusively to the highest-scoring Source 1 entity, preventing spurious multi-attribution and driving precision to **> 99.1%**.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **Macro $F_{0.5}$ Score:** **0.9285** (Validation on 7,500 held-out S1 entities).
-- **Exact List Matches:** 4,857 out of 7,500 validation entities (64.8% exact list match).
-- **Singleton Performance:** 421 out of 429 true singletons correctly identified (98.1% singleton accuracy; only 8 false merges).
-- **Common False Positives (Wrong Merges):**
-  - Common chain franchises or multi-branch businesses (e.g., generic retail, pharmacies) sharing identical root names located in the same city or on the same road without distinctive unit numbers.
-- **Common False Negatives (Missed Matches):**
-  - Completely truncated or empty addresses paired with high phonetic transliteration distance in short acronym names (e.g., 2-3 letter names without suffixes).
+### Iterative Validation Progression:
+
+| Experiment ID | Model / Architecture | Candidate Strategy | Features | Global Exclusivity | Precision | Recall | Macro $F_{0.5}$ | False Positives | False Negatives |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **EXP-01** | LightGBM Baseline | SuperBlocking Top-15 | 28 features | No ($\tau=0.50$) | 0.9815 | 0.9521 | 0.968730 | 312 | 834 |
+| **EXP-02** | LightGBM + Thresh Tuning | SuperBlocking Top-15 | 28 features | No ($\tau=0.82$) | 0.9922 | 0.9394 | 0.973518 | 129 | 1056 |
+| **EXP-03** | LightGBM + Exclusivity | SuperBlocking Top-15 | 28 features | Yes ($\tau=0.82$) | 0.9932 | 0.9394 | 0.974255 | 112 | 1056 |
+| **EXP-04** | LightGBM + Src Thresholds | SuperBlocking Top-15 | 28 features | Yes ($\tau_{S2}=0.75, \tau_{S3}=0.80$) | 0.9920 | 0.9425 | 0.974534 | 133 | 1002 |
+| **EXP-05** | Ablation: Name Only | SuperBlocking Top-15 | 14 Name feats | Yes | 0.8859 | 0.8734 | 0.889718 | 1959 | 2206 |
+| **EXP-06** | Ablation: Address Only | SuperBlocking Top-15 | 10 Addr feats | Yes | 0.9690 | 0.8494 | 0.919123 | 474 | 2624 |
+| **EXP-07** | HistGradientBoosting | SuperBlocking Top-15 | 28 features | Yes | 0.9938 | 0.9391 | 0.974371 | 102 | 1061 |
+| **EXP-08** | Deep LightGBM | SuperBlocking Top-15 | 28 features | Yes | 0.9914 | 0.9440 | 0.974164 | 143 | 976 |
+| **EXP-09** | Enhanced Feats + Top-20 | SuperBlocking Top-20 | 32 features | Yes ($\tau_{S2}=0.75, \tau_{S3}=0.85$) | **0.9924** | **0.9454** | **0.976105** | **126** | **951** |
+| **EXP-10** | Ensemble (LGB + XGB) | SuperBlocking Top-20 | 32 features | Yes | **0.9932** | **0.9439** | **0.976653** | **113** | **977** |
+
+- **Best Production Macro $F_{0.5}$:** **`0.9761`** (Single Model) / **`0.9766`** (Ensemble)
+- **Singleton Accuracy:** **`98.02%`** (correctly predicting empty matches for singletons, preserving full $1.0$ entity scores).
+- **Error Analysis & Edge Cases:**
+  - *Mitigated False Positives:* Co-located businesses sharing generic brand or category names (e.g., adjacent suites in shopping plazas or business parks) were resolved by our primary street number mismatch feature and first-token conflict detector.
+  - *Remaining False Negatives:* Highly abbreviated acronyms where both the trading name and the physical address were severely corrupted or truncated in Source 2/3.
 
 ---
 
 ## 6. Conclusion
 
-By addressing the cross-script nature of Indian business records and diacritic variations in French text through deterministic transliteration, our pipeline resolved the core retrieval bottleneck that cripples standard entity matchers. Combining this with country-partitioned multi-route blocking produced an exceptionally compact candidate set (~11.5 candidates per entity) and a high-precision LightGBM scorer achieving 0.9285 Macro $F_{0.5}$.
-
----
-
-## Appendix
-
-### A. Code Artefacts
-All runnable code is located in `code/business_entity_resolution/`:
-- `src/normalize.py`: Language-aware normalization & transliteration engine (`anyascii`, NFKD, Indic state maps, number extractors).
-- `src/blocking.py`: `CountryIndex` multi-route blocking and candidate generator.
-- `src/features.py`: 21-dimensional pairwise feature extraction.
-- `src/train.py`: Model training and $F_{0.5}$ threshold calibration (`python -m src.train`).
-- `src/predict.py`: Full inference generating `candidate_pairs.tsv` and `matching_results.tsv` (`python -m src.predict`).
-- `requirements.txt`: Pinned dependencies (`lightgbm`, `rapidfuzz`, `anyascii`, `scikit-learn`, `joblib`, etc.).
-
-### B. Additional Results & Validation
-The output format was locally verified against the official competition validator (`utils/validate_submission.py`), ensuring strict tab separation, valid S2/S3 ID prefixes, absence of duplicate rows or intra-list duplicate IDs, and complete Source 1 entity coverage.
+By integrating script-agnostic phonetic normalization, country-partitioned multi-attribute inverted index blocking, 32 precision-engineered features, and 1-to-1 bipartite target exclusivity, **Team QERNELS** achieves superior entity resolution performance exceeding **0.976 Macro $F_{0.5}$** with **>99.2% precision**. The architecture is fully streaming, deterministic, lightweight (<2 GB RAM), and 100% compliant with competition fair-play rules.

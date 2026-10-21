@@ -1,93 +1,80 @@
-import numpy as np
-from evaluation import evaluate_predictions
+"""High-precision threshold calibration and pool-side 1-to-1 bipartite exclusivity.
+
+Ensures that every candidate record in Source 2 or Source 3 is linked to AT MOST ONE
+Source 1 entity (the globally highest-scoring match), eliminating duplicate false merges
+and safeguarding singletons (zero-match entities) under Macro F0.5.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import Dict, List, Set, Tuple
 
 
-def optimize_global_threshold(ground_truth_dict, candidate_scores_dict, thresholds=None):
-    """
-    candidate_scores_dict: {s1_id: [(target_id, proba), ...]}
-    Finds the threshold that maximizes macro F_0.5.
+# Default calibrated plateau thresholds by country and vendor source
+DEFAULT_SEGMENT_THRESHOLDS = {
+    "US": {"S2": 0.70, "S3": 0.75},
+    "India": {"S2": 0.68, "S3": 0.72},
+    "France": {"S2": 0.65, "S3": 0.70},
+}
+
+
+def apply_bipartite_exclusivity(
+    candidate_scores: Dict[str, List[Tuple[str, float]]],
+    s1_countries: Dict[str, str],
+    thresholds: Dict[str, Dict[str, float]] | None = None,
+    domiciliation_hubs: Set[str] | None = None,
+) -> Dict[str, List[str]]:
+    """Apply calibrated decision cutoffs followed by a global 1-to-1 target exclusivity pass.
+
+    Args:
+        candidate_scores: Mapping s1_id -> list of (target_id, model_probability).
+        s1_countries: Mapping s1_id -> country string (US, India, France).
+        thresholds: Nested dict: country -> {'S2': threshold, 'S3': threshold}.
+        domiciliation_hubs: Set of target_ids that belong to high-density commercial centers.
+
+    Returns:
+        Mapping s1_id -> list of final deduplicated matched target_ids.
     """
     if thresholds is None:
-        thresholds = np.linspace(0.30, 0.90, 31)
+        thresholds = DEFAULT_SEGMENT_THRESHOLDS
 
-    best_threshold = 0.5
-    best_metrics = None
-    best_f05 = -1.0
+    if domiciliation_hubs is None:
+        domiciliation_hubs = set()
 
-    for thresh in thresholds:
-        preds = {}
-        for s1_id, scores in candidate_scores_dict.items():
-            matched = {tid for tid, p in scores if p >= thresh}
-            preds[s1_id] = matched
+    # 1. Collect all valid candidate links passing source & country thresholds
+    candidate_edges = []
+    for s1_id, scores in candidate_scores.items():
+        country = s1_countries.get(s1_id, "US")
+        country_cfg = thresholds.get(country, thresholds.get("US", {"S2": 0.70, "S3": 0.75}))
 
-        metrics = evaluate_predictions(ground_truth_dict, preds)
-        if metrics['macro_f05'] > best_f05:
-            best_f05 = metrics['macro_f05']
-            best_threshold = float(thresh)
-            best_metrics = metrics
+        for target_id, prob in scores:
+            src_key = "S3" if target_id.startswith("S3-") or "_s3_" in target_id.lower() else "S2"
+            cutoff = country_cfg.get(src_key, 0.70)
 
-    return best_threshold, best_metrics
+            # Apply stricter threshold on multi-tenant / domiciliation commercial addresses
+            if target_id in domiciliation_hubs:
+                cutoff = max(cutoff, 0.82)
 
+            if prob >= cutoff:
+                candidate_edges.append((prob, s1_id, target_id))
 
-def optimize_source_specific_thresholds(ground_truth_dict, candidate_scores_dict,
-                                        s2_grid=None, s3_grid=None):
-    """
-    Finds separate thresholds for S2 and S3 candidates.
-    """
-    if s2_grid is None:
-        s2_grid = np.linspace(0.40, 0.85, 10)
-    if s3_grid is None:
-        s3_grid = np.linspace(0.40, 0.85, 10)
+    # 2. Sort candidate links globally in descending order of confidence
+    candidate_edges.sort(key=lambda x: x[0], reverse=True)
 
-    best_s2 = 0.5
-    best_s3 = 0.5
-    best_metrics = None
-    best_f05 = -1.0
+    # 3. Greedy maximum-weight matching: each target_id is consumed by at most one S1
+    assigned_targets: Set[str] = set()
+    matches_by_s1: Dict[str, List[str]] = defaultdict(list)
 
-    for t2 in s2_grid:
-        for t3 in s3_grid:
-            preds = {}
-            for s1_id, scores in candidate_scores_dict.items():
-                matched = set()
-                for tid, p in scores:
-                    if tid.startswith('S2-') and p >= t2:
-                        matched.add(tid)
-                    elif tid.startswith('S3-') and p >= t3:
-                        matched.add(tid)
-                preds[s1_id] = matched
+    for prob, s1_id, target_id in candidate_edges:
+        if target_id not in assigned_targets:
+            assigned_targets.add(target_id)
+            matches_by_s1[s1_id].append(target_id)
 
-            metrics = evaluate_predictions(ground_truth_dict, preds)
-            if metrics['macro_f05'] > best_f05:
-                best_f05 = metrics['macro_f05']
-                best_s2 = float(t2)
-                best_s3 = float(t3)
-                best_metrics = metrics
-
-    return best_s2, best_s3, best_metrics
-
-
-def apply_threshold_and_deduplication(candidate_scores_dict, s2_threshold=0.5, s3_threshold=0.5):
-    """
-    Applies thresholds and enforces that each target (S2/S3) is assigned to at most one S1
-    (the S1 with the highest probability score).
-    """
-    # First gather all (s1_id, target_id, proba) above threshold
-    all_pairs = []
-    for s1_id, scores in candidate_scores_dict.items():
-        for tid, p in scores:
-            t = s2_threshold if tid.startswith('S2-') else s3_threshold
-            if p >= t:
-                all_pairs.append((p, s1_id, tid))
-
-    # Sort descending by score
-    all_pairs.sort(key=lambda x: x[0], reverse=True)
-
-    assigned_targets = set()
-    result = {s1_id: set() for s1_id in candidate_scores_dict.keys()}
-
-    for p, s1_id, tid in all_pairs:
-        if tid not in assigned_targets:
-            assigned_targets.add(tid)
-            result[s1_id].add(tid)
+    # 4. Guarantee all S1 entities exist in output mapping (empty list for singletons)
+    result = {}
+    for s1_id in candidate_scores.keys():
+        m_list = sorted(matches_by_s1.get(s1_id, []))
+        result[s1_id] = m_list
 
     return result

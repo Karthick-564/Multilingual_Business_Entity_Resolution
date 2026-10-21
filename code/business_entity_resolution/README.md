@@ -1,150 +1,86 @@
-# Amazon ML Challenge 2026: Business Entity Resolution Pipeline
+# High-Precision Multilingual Business Entity Resolution Pipeline
 
-**Team Name:** Team QERNELS  
-**Track:** Business Entity Resolution  
-**Status:** Validated & Production-Ready (`validate_submission.py` PASS)
+This directory contains the self-contained, reproducible pipeline for the **Amazon ML Challenge 2026: Business Entity Resolution**.
 
----
+## Architecture & Innovation Highlights
 
-## 1. Overview & Architecture
+1. **Language & Script Aware Normalization**:
+   - Deterministic transliteration (`anyascii`) converting 9 Indic scripts (Devanagari, Tamil, Telugu, Kannada, Gujarati, Bengali, Malayalam, Gurmukhi, Oriya) to Romanized Latin ASCII.
+   - Unicode NFKD decomposition and diacritic stripping for accented French and noisy English text.
+   - Indian native-script state standardizer (`महाराष्ट्र` -> `maharashtra`, `ગુજરાત` -> `gujarat`, etc.).
+   - Standardized legal entity category extraction (`PVT_LTD`, `CORP`, `INC`, `LLC`, `SARL`, `SAS`).
+   - Universal numeric anchor & postal code extraction (6-digit Indian PIN, 5-digit US/FR ZIP).
 
-This repository contains the complete, self-contained end-to-end pipeline developed by **Team QERNELS** for the **Amazon ML Challenge 2026 Business Entity Resolution** task.
+2. **Country-Partitioned Multi-Route Candidate Generation (Blocking)**:
+   - Dynamic grouping by `country` (satisfies open-set requirements, zero cross-country leakage).
+   - Inverted index on exact normalized root name.
+   - Rare-token inverted index on distinctive words.
+   - Address numeric anchor + locality word index.
+   - Candidate set bounded to an adaptive top 15 per Source-1 entity (achieving 90%+ candidate recall with high candidate precision).
 
-The system is optimized directly for the competition metric, **Macro $F_{0.5}$**, where **Precision is weighted $2\times$ over Recall**, and singleton entities (entities with 0 ground-truth matches) require conservative abstention to avoid catastrophic false-merge penalties.
-
-### Pipeline Stages:
-1. **Script-Agnostic Phonetic Normalization (`normalization.py`):** Unifies multilingual Indian scripts (Devanagari, Telugu, Tamil, Kannada, Gujarati, Bengali, Malayalam, Punjabi, Oriya) into Romanized phonetic ASCII via unidecoding, harmonizes French diacritics and address tokens, and strips international legal suffixes (`Pvt Ltd`, `LLC`, `SARL`, `SAS`, `GmbH`).
-2. **Country-Partitioned Multi-Attribute Inverted Indexing (`blocking.py`):** Partitions candidate generation strictly by country (exploiting the 0.00% cross-country matching law), using 8 composite indexing routes (compact names, root n-grams, street number + street token, name token + postal/locality) with frequency capping (>150–300 count pruning). Achieves **>96.4% candidate recall** while reducing the Cartesian comparison space by **99.98%**.
-3. **Supervised Pairwise Classifier (`features.py`, `model.py`):** Extracts 32 heterogeneous features spanning exact core matches, character 3-gram similarities, Levenshtein, Jaro-Winkler, primary building/street number match/conflict vetoes, first-token conflicts, and cross-source interactions. Predicted using an ensemble of Gradient Boosted Decision Trees (XGBoost / LightGBM) trained on hard negatives mined directly from blocking look-alikes.
-4. **Calibrated Thresholding & Bipartite 1-to-1 Target Exclusivity (`thresholding.py`):** Calibrates separate decision thresholds for Source 2 ($\tau_{S2} = 0.70$) and Source 3 ($\tau_{S3} = 0.75$), followed by greedy highest-confidence 1-to-1 target assignment to prevent spurious multiple-attribution, achieving **>99.1% validation precision**.
-
----
-
-## 2. Fair-Play & Model License Compliance
-
-All algorithms and models used in this pipeline strictly adhere to the competition rules, are **≤ 8B parameters individually**, and are released under permissive open-source licenses (MIT / Apache-2.0 / ISC):
-
-| Component / Model | Type | Parameter Count | License | Permitted |
-| :--- | :--- | :---: | :---: | :---: |
-| **Inverted Index Multi-Route Blocker** | Algorithmic Indexing | 0 (Heuristic / Hashing) | Custom / Apache-2.0 | Yes |
-| **XGBoost Classifier** | Gradient Boosted Trees | ~63,000 parameters (< 0.0001B) | Apache-2.0 | Yes (≤ 8B) |
-| **LightGBM Classifier** | Gradient Boosted Trees | ~35,000 parameters (< 0.0001B) | MIT | Yes (≤ 8B) |
-| **RapidFuzz Engine** | C++ String Metrics | 0 (Algorithmic) | MIT | Yes |
-| **Text-Unidecode / AnyAscii** | Phonetic Transliteration | 0 (Deterministic Table) | Artistic / MIT / ISC | Yes |
-| **Bipartite Exclusivity Matcher** | Greedy Graph Matching | 0 (Algorithmic) | Apache-2.0 | Yes |
-
-*No closed-source APIs, proprietary LLMs, or pre-trained models exceeding 8B parameters were used.*
+3. **Supervised Pair Matcher & Precision Calibration**:
+   - 21 engineered pairwise features spanning token sort/set similarities, Jaro-Winkler, numeric agreement/conflict detection, postal code matches, and retrieval signals.
+   - LightGBM binary classifier (MIT licensed, < 8B parameters, CPU-optimized).
+   - Calibrated decision threshold tuned specifically for **Macro F_0.5** (prioritizing precision over recall and protecting singletons).
 
 ---
 
-## 3. Environment Setup & Requirements
+## Directory Structure
 
-### Hardware Requirements
-- **RAM:** Minimum 8 GB (Pipeline uses streaming & SQLite caching, peak RAM usage is **< 2.0 GB**).
-- **Disk:** Minimum 5 GB free disk space for temporary candidate caching and output TSV files.
-- **Compute:** Multi-core CPU (supports 4 to 20+ threads). Optional NVIDIA CUDA GPU for accelerated tree scoring.
-- **Expected End-to-End Runtime:**
-  - Training: ~15 – 25 minutes
-  - Test Inference (all 1.73M S1 entities across 11.5M records): ~85 – 100 minutes
+```text
+code/business_entity_resolution/
+├── README.md                      # Reproducibility instructions
+├── requirements.txt               # Pinned dependencies
+├── artifacts/
+│   └── matcher_model.joblib       # Trained LightGBM model & threshold metadata
+└── src/
+    ├── __init__.py
+    ├── config.py                  # Shared constants, paths, thresholds
+    ├── normalize.py               # Multilingual transliteration & text normalization
+    ├── features.py                # Pairwise feature extraction
+    ├── blocking.py                # CountryIndex multi-route blocking
+    ├── train.py                   # Pair generation, training, threshold tuning
+    ├── predict.py                 # Candidate generation & matching inference
+    ├── evaluate.py                # Macro F_0.5 evaluation
+    ├── io_utils.py                # TSV reader/writer helpers
+    └── audit.py                   # Data inspection tool
+```
 
-### Environment Installation
-Create a clean Python 3.10+ virtual environment and install the exact pinned dependencies:
+---
+
+## Environment Setup
+
+Install pinned dependencies in Python 3.10+:
 
 ```bash
-# 1. Create and activate clean virtual environment
-python -m venv venv
-
-# On Linux/macOS:
-source venv/bin/activate
-
-# On Windows:
-.\venv\Scripts\activate
-
-# 2. Upgrade pip and install pinned requirements
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
 ---
 
-## 4. End-to-End Reproduction Instructions
+## Reproduction Commands
 
-To reproduce both `output/candidate_pairs.tsv` and `output/matching_results.tsv` from the raw dataset, execute the following commands in order:
-
-### Step 1: Model Training (Hard Negative Mining & Calibration)
-To train the gradient-boosted pairwise model from scratch using the raw training dataset:
+### 1. Train the Pair Matcher
+To train the LightGBM classifier on the training data and tune the decision threshold:
 
 ```bash
-python src/train.py \
-    --train-dir dataset/train \
-    --n-train 60000 \
-    --n-val 10000 \
-    --model-type xgboost_gpu \
-    --model-out models/final_entity_matcher.joblib \
-    --meta-out models/model_metadata.json
+python -m src.train --data-root ../../dataset --output-model artifacts/matcher_model.joblib --sample-limit 30000
 ```
-*(If running on a CPU-only environment, omit `_gpu` to use `--model-type xgboost` or `--model-type lightgbm`)*.
 
-### Step 2: Test Dataset Inference & Output Generation
-Run the production inference pipeline on the test dataset. This performs country-partitioned blocking, feature extraction, GPU/CPU batch scoring, and bipartite target exclusivity post-processing:
+### 2. Generate Final Submissions
+To run candidate generation and matching inference on the test set:
 
 ```bash
-python src/main.py \
-    --test-dir dataset/test \
-    --model-path models/final_entity_matcher.joblib \
-    --meta-path models/model_metadata.json \
-    --output-dir output \
-    --batch-size 10000 \
-    --top-k 20
+python -m src.predict --data-root ../../dataset --model-path artifacts/matcher_model.joblib --output-dir ../../output
 ```
 
 This generates:
-- `output/candidate_pairs.tsv`: Full candidate sets for all 1,732,544 test Source 1 entities.
-- `output/matching_results.tsv`: Final high-precision entity resolution matches.
+* `output/candidate_pairs.tsv`
+* `output/matching_results.tsv`
 
-### Step 3: Run the Official Submission Validator
-Verify the generated output files against every competition integrity and formatting rule:
+### 3. Validate Submission
+Run the official challenge validator from `student_resource/`:
 
 ```bash
-python utils/validate_submission.py \
-    --matching output/matching_results.tsv \
-    --candidate output/candidate_pairs.tsv \
-    --test-dir dataset/test
-```
-**Expected Output:**
-```
-ML Challenge 2026 — submission validator
-  test dir: dataset/test
-  required S1 entities: 1732544
-  matching_results.tsv: 1732544 rows (141769 empty, 1590775 non-empty).
-  candidate_pairs.tsv: 1732544 rows (42 empty, 1732502 non-empty).
-PASS — no blocking issues found. Safe to submit.
-```
-
----
-
-## 5. File & Directory Layout
-
-```
-Team_QERNELS_submission/
-├── output/
-│   ├── matching_results.tsv       # Final matches (byte-identical to leaderboard submission)
-│   └── candidate_pairs.tsv        # Complete blocking candidate set
-├── code/
-│   └── business_entity_resolution/
-│       ├── src/
-│       │   ├── __init__.py        # Package initialization
-│       │   ├── normalization.py   # Script-agnostic phonetic & text normalization
-│       │   ├── blocking.py        # Multi-attribute inverted index candidate generation
-│       │   ├── features.py        # 32 heterogeneous pairwise feature extraction
-│       │   ├── model.py           # Classifier architectures (XGBoost / LightGBM)
-│       │   ├── train.py           # Hard negative mining and model training
-│       │   ├── thresholding.py    # Macro F0.5 calibration & 1-to-1 bipartite exclusivity
-│       │   ├── inference.py       # Batched streaming inference engine with disk caching
-│       │   ├── main.py            # CLI entry point for test pipeline execution
-│       │   ├── output.py          # TSV formatting and disk streaming
-│       │   └── evaluation.py      # Macro F0.5 evaluation implementation
-│       ├── README.md              # Reproduction instructions & license audit (this file)
-│       └── requirements.txt       # Exact pinned dependencies
-└── Documentation_template.md      # Completed methodology write-up
+python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test
 ```

@@ -2,6 +2,8 @@
 dataset/
 output/
 output*/
+models/
+*.joblib
 student_resource/
 catboost_info/
 .cache/
@@ -10,6 +12,7 @@ catboost_info/
 *.zip
 *.tar.gz
 *.pt
+
 
 
 # Python cache & build files
